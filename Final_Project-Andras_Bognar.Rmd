@@ -1,0 +1,364 @@
+---
+title: "DV2 Final Project -- Himalayan Climbing"
+author: "A. BOGNAR"
+date: "1/25/2022"
+output: html_document
+---
+
+## Introduction
+
+The [Himalayan Climbing]("https://github.com/rfordatascience/tidytuesday/blob/master/data/2020/2020-09-22/readme.md") dataset of the [Tidy Tuesdays project]("https://github.com/rfordatascience/tidytuesday") contains historical data of over 10 thousand expeditions to various peaks of the Himalayas from 1905 to 2019. In this analysis, I try to investigate what makes an expedition successful through visualizations.
+
+```{r , message = F , warning = F}
+
+# Load custom theme, current working folder has to be set.
+setwd("C:/Users/abogn/CEU/Study/da2/final_proj")
+source("theme_himalaya.R")
+library(data.table)
+library(tidyverse)
+library(ggmap)
+library(tidygeocoder)
+library(stringr)
+library(kableExtra)
+library(modelsummary)
+library(gganimate)
+
+dt_exp <- data.table(fread("https://raw.githubusercontent.com/BognarAndras/dv2_Final/main/clean/expeditions.csv"))
+dt_member <- data.table(fread("https://raw.githubusercontent.com/BognarAndras/dv2_Final/main/clean/members.csv"))
+dt_peaks <- data.table(fread("https://raw.githubusercontent.com/BognarAndras/dv2_Final/main/clean/peaks.csv"))
+
+
+```
+
+# Graph 1 - Peaks above 8000
+
+Before turning to the data, lets put in context the phenomenon that is the Himalaya. 8 of the 10 highest points on Earth are in the Himalayas, which is spread out through 5 countries. However, the majority of the mountain is confined to Nepal. Below is a map with the above 8000 meter points named.  
+
+```{r , warning=FALSE , message=FALSE}
+
+# Select peaks above 8 km
+
+dt_peaks_temp <-  dt_peaks[ height_metres > 8000 , .( height_metres ,
+                                    peak_name ) ]
+
+# get geocodes
+geocodes <- geocode(dt_peaks_temp, 'peak_name')
+# unfortunately some names will generate no codes or incorrect codes, exclude those
+geocodes <- data.table(geocodes)[!is.na(lat) & lat > 27]
+
+# build a map for nepal
+bbox <- c(bottom = min(geocodes$lat - 0.5) ,
+          left = min(geocodes$long) - 0.05,
+          top = max(geocodes$lat) + 0.5,
+          right = max(geocodes$long) + 0.05)
+
+NE <- get_stamenmap(bbox, zoom = 10, crop = FALSE , maptype = "terrain-background")
+
+# move names of peaks around that are too close
+geocodes[2]$long <- geocodes[2]$long + 0.2
+geocodes[7]$lat  <-  geocodes[8]$lat - 0.15
+geocodes[8]$long  <-  geocodes[8]$long - 0.45
+geocodes[11]$long  <-  geocodes[11]$long + 0.45
+
+# create map with names of peaks
+ggmap(NE) +
+  geom_text( data = geocodes ,
+             aes( long  , lat , label = peak_name), size = 4 ,
+             fontface = "bold" , colour = "red")  +
+  theme_void() + theme(legend.position = 'none')
+
+```
+
+# Graph 2 - Disribution of Peaks
+
+While most attention has always been devoted to the highest peaks, the dataset contains a total of 468 named points. Most of them are between 6 and 7 thousand meters with only one reaching 8850.
+
+```{r}
+# distribution of heighs labeling mount everest
+
+ggplot( data = dt_peaks , aes( height_metres )  ) +
+  geom_histogram(  colour="white" , binwidth = 125 ,  fill = "slateblue3" ) +
+  geom_label(aes(x = max(dt_peaks$height_metres) - 250 , y = 10),
+             label = paste0("Mount Everest: " , max(dt_peaks$height_metres)) ,
+             size = 4.5, color = 'red', fill = "white") +
+  ggtitle("Distribution of Peak Heights") +
+  scale_x_continuous( breaks = seq(5400 , 8900, 500)) +
+  xlab("Peak Heights (meters)") +
+  ylab("Count") +
+  theme_Himalaya()
+
+```
+
+
+# Graph 3 - Success of Expedition
+
+How to evaluate the success of an expedition? Simple data points of course can not capture the bravery of climbers set out to reach new heights. However, by devising arbitrary measures, we can begin to understand the main challenges of the expeditions. My first measure for success is simply whether the crew reached the goal they set out to or not. Height being the natural obstacle plays a big role in that regard. Below you can see that expeditions that reach either a subpeak or their final destinations tend to aim for somewhat lower heights on average. 
+
+```{r}
+
+# Dont include expeditions whose outcome is not certain
+exclude <- c( "Did not attempt climb" , "Attempt rumoured"  , "Unknown")
+# Subpeaks are considered to be partial success, every other point reached is full
+# success
+success <-  c("Success (main peak)" , "Success (claimed)")
+
+dt_exp[, ':='(outcome = ifelse(termination_reason %in% success ,
+                            "Success" ,
+                        ifelse(termination_reason %in% exclude ,
+                            dt_exp$termination_reason ,
+                        ifelse(termination_reason == "Success (subpeak)" ,
+                            "Partial Success" ,
+                            "Failure")))) ]
+
+# join together peaks and expedition tables
+
+dt_exp[dt_peaks, on = 'peak_id', height_metres := i.height_metres]
+dt_exp_outcome <- dt_exp[!(outcome %in% exclude)]
+dt_exp_outcome <- dt_exp_outcome[!is.na(height_metres)]
+
+ggplot( data = dt_exp_outcome ,
+        aes( factor( outcome  ) , height_metres )) +
+  geom_violin(  fill = "slateblue3" , color = "slateblue3" ,
+                alpha = 0.5 , size = 0.7  ) +
+  xlab("Outcome of expedition") +
+  ylab("Target Peak Height") +
+  theme_Himalaya()
+
+```
+
+# Graph 4 - Crew size
+
+They say *the more the merrier*. But is that also the case for extreme mountain climbing? Below you will see that expeditions that reach their targets indeed tend to go with bigger sized crews. The average crew consists of 5 members, but it is not unheard of to have over 30 people in a group. However, this is not common, so for better illustration I grouped expeditions with 30 members. Also, note that these crew sizes don't include paid helpers, only the volunteering members, tough we see a similar trend among group sizes if we include helpers.
+
+```{r}
+
+# reset outcome table to include correct crew size
+
+dt_exp_outcome <- dt_exp[!(outcome %in% exclude)]
+median_crew <- median(dt_exp_outcome$members)
+
+# large crews are very rare, hard to represent on density plot, so cap at 30
+
+dt_exp_outcome[ , ':='(members = ifelse(members > 29 , 30 , members ) )]
+
+
+ggplot( data = dt_exp_outcome , aes( members , fill = factor( outcome ) )) +
+  geom_density( alpha = 0.35 ) +
+  geom_segment(data = dt_exp_outcome, aes(x=median(members), xend=median(members),
+                                  y=0,
+                                  yend=0.16),
+               color = "red" ) +
+  geom_label(aes(x = median_crew + 10 , y = 0.125),
+             label = paste0("Median Crew has " , median_crew , " members.") ,
+             size = 4.5, color = 'red', fill = "white") +
+  ggtitle("Members of expedition based on outcome*") +
+  labs(caption = "*Up to 30 members") +
+  guides( fill = guide_legend( title = "Outcome" )) +
+  scale_x_continuous( limit = c(0 , 30)) +
+  xlab("Number of members") +
+  ylab("Density") +
+  theme_Himalaya()
+
+```
+
+# Graph 5 - Fatalities
+
+Even with a strong crew, taming the Himalayas is a dangerous business. The second measure for success is survival. Below you can see the number of deaths among a crew (both members and hired helpers) by target peak height and the season of the expedition. First, we see that higher peaks tend to be more deadly. This is not surprising. However, it also seems that the deadliest seasons are Spring and Autumn with Winter crews having the least casualties. How can this be? Well, we also have to consider the amount of data points, in fact very few expeditions ever attempted to go out in the winter. The monsoon of the [Himalayas]("https://en.wikipedia.org/wiki/Himalayas") restricts tourism most of the year and so expeditions usually take place in April-May or October-November. You will also see that crews daring to set out during the Summer and Winter see the steepest heigh-casualty curves. A mixture of dangerous times and places is a recipe for disaster.
+
+```{r}
+
+# create measure for all deaths
+dt_exp[ , ':='(deaths = member_deaths + hired_staff_deaths )]
+
+dt_exp_height <-  dt_exp[!is.na(height_metres)]
+dt_exp_height <-  dt_exp_height[!(season == "Unknown")]
+
+ggplot( data = dt_exp_height ,
+        aes( deaths , height_metres   )) +
+  geom_point( alpha = 0.5 ) +
+  geom_smooth( method = 'lm' , data = dt_exp_height ,
+               aes( color = factor( season )) , se = FALSE , size = 1.5 ) +
+  scale_x_continuous(breaks = seq(0 , max(dt_exp_height$deaths) , 3)) +
+  ggtitle("How height and seasons affect fatalities") +
+  guides( color = guide_legend( title = "Seasons" )) +
+  xlab("Number of fatalities in an expedition") +
+  ylab("Target peak height") +
+  theme_Himalaya()
+
+```
+
+# Graph 6 - Expeditions by countries
+
+So we learned that crew size is positively associated with expedition success. But does that hold equally for crews of different countries? I looked at the 10 countries with the most successful expeditions to find out if their source of success lies in their large crew sizes. As you can see the avg. number of crew (members + hired helpers) is relatively similar in the successful counters. However, the top countries do tend to have quite a few extreme group sizes. Italy even had a group of over 150 people. Note that the country of the group was simply decided by the nationality of the leader. Also, a few groups had two leaders, in these cases I took the nationality of the first leader based on ID number, tough their nationality was usually the same as of the second leader.
+
+```{r}
+
+# reset outcome table
+dt_exp_outcome <- dt_exp[!(outcome %in% exclude)]
+# join with member table only for leaders
+dt_member_leader  <-  dt_member[expedition_role == "Leader"]
+
+
+# some expeditions have 2 leaders solve this by
+# 1. getting id of these expeditions
+exp_ids <- unique(dt_exp_outcome$expedition_id)
+duplicate_leaders_expedition <- dt_member_leader[expedition_id %in% exp_ids , .(.N) , by = expedition_id][N > 1][, expedition_id]
+
+# 2. get only the first leader's member id in these expeditions
+duplicate_ids <- dt_member_leader[expedition_id %in% duplicate_leaders_expedition 
+                 , .(expedition_id , 
+                    member_id)][str_sub(member_id,-2,-1) == "01"][
+                      , member_id ]
+nonduplicate_ids <-  dt_member_leader[!(expedition_id %in% duplicate_leaders_expedition) ,
+                  expedition_id, member_id][, member_id]
+
+# 3. add to that the leader ids of expeditions with only 1 leader, now you have
+# the list of all leaderss' ids
+unique_ids <- c(duplicate_ids , nonduplicate_ids)
+
+# 4. make the join
+
+dt_exp_outcome_lead <- dt_exp_outcome[dt_member_leader[member_id %in% unique_ids],
+               on = 'expedition_id', leader_country := i.citizenship]
+
+dt_exp_outcome_lead <- dt_exp_outcome_lead[!is.na(leader_country)]
+
+# Get most succesful countries that have most succesful trips
+
+success_countries <- dt_exp_outcome_lead[outcome == "Success" 
+                                    , .(number_of_success = .N ) ,
+                    by = leader_country][order(-number_of_success)][1:10]$leader_country
+
+# Finally, make measure for full crew size. Factor countries to keep order in ggplot.
+
+success_crew_size <- dt_exp_outcome_lead[leader_country %in% success_countries ,
+                    .(crew_size = members + hired_staff , leader_country)]
+success_crew_size$leader_country <- factor(success_crew_size$leader_country, 
+                                    levels = success_countries)
+
+ggplot( data = success_crew_size , 
+        aes( factor( leader_country ) , crew_size  )) +
+  geom_boxplot(  fill = "slateblue3" , color = "slateblue3" , 
+                 alpha = 0.5 , outlier.size = 1.5 ) + 
+  ggtitle("Top 10 Countries by succesful expeditions") +
+  xlab("") +
+  ylab("Crew Size") +
+  theme_Himalaya() +
+  theme(axis.text = element_text( size = 9 ))
+
+```
+
+# Graph 7 - Agency
+
+If we are talking about support for an expedition, a trekking agency might be considered for guidance. These local organizations provide touristic and professional training and orientation for expeditions, but are they safer then self-organized adventures? Below I devised a measure of Avg. Fatalities which is simply the total number of deaths in the expeditions of an agency divided by the number of trips taken. I selected the 10 best performing agencies and compared it to crews without agencies. We see that unorganized crews have more than twice as high fatality ratios than the full average for all trekking agencies. Granted this measure doesn't consider that agencies generally plan safer expeditions due to liability. Still, the big gap suggests that these agencies do offer safer options.
+
+```{r}
+
+# Make a separate category for when there is no trekking agency, it can either be
+# "None" or NA
+
+dt_exp_trek <- dt_exp[ , ':='(trekking_corrected = ifelse(is.na(trekking_agency) |
+                           trekking_agency == "None",
+                          "No agency" , trekking_agency))] 
+
+# Other than deaths, number of injuries may be measured
+# Here, I only focused on deaths for simpler result 
+
+dt_exp_injured <- dt_member[ , .(sum(injured)) , by = expedition_id]
+
+dt_trek <-  merge(dt_exp_trek , dt_exp_injured , key = expedition_id)
+
+# Measure of deaths created
+
+dt_trek[ , ':='(death_num = member_deaths + hired_staff_deaths  )]
+
+# Only looking at agencies with over 100 trips
+dt_trek_test <- dt_trek[ ,  .(sum(death_num) , .N  ),
+         by = .(trekking_corrected)][N > 100][, ':='(death_rate = V1/N)]
+
+# To the top 10 agencies add the full average as well as no agency outcome
+
+top_10_agencies <- dt_trek_test[order(death_rate)][1:10]
+no_agency_rating <- dt_trek_test[trekking_corrected == "No agency"]
+all_agency_rating <-  dt_trek[trekking_corrected != "No agency",  
+                              .(sum(death_num), .N  )][, ':='(
+                                trekking_corrected = "All agencies",death_rate = V1/N)]
+
+# Have to rename some agencies to fit better in graph
+
+agency_death_table <- rbind(top_10_agencies , no_agency_rating , all_agency_rating)
+agency_death_table[1]$trekking_corrected <- "Mountain Ex"
+agency_death_table[2]$trekking_corrected <- "Thamserku"
+agency_death_table[3]$trekking_corrected <- "Prestige Adv"
+agency_death_table[4]$trekking_corrected <- "Monterosa"
+agency_death_table[6]$trekking_corrected <- "Summit Nepal"
+
+ggplot( data = agency_death_table , 
+        aes( reorder(trekking_corrected , death_rate ), death_rate , 
+             fill = ifelse(trekking_corrected %in%
+             c("All agencies" , "No agency") , "darkorange3" , "slateblue3" ))) +
+  geom_bar( stat = "identity" ) + 
+  geom_text(label = agency_death_table$trekking_corrected , angle = 90, hjust = 1.05, 
+            size = 3 , colour = "black" ) +
+  ggtitle("Top 10 Agencies by least deaths") +
+  xlab("") +
+  ylab("Avg. Fatalities per expedition") +
+  theme_Himalaya() +
+  theme(legend.position = "none") +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())
+```
+
+## Animation -- Top 3 Peaks over the years
+
+Lastly, let us consider the time frame of these expeditions. Decade after decade climbers returned and new ones joined to develop better routes and techniques for reaching the mountain tops. The result? Well, below you can see the top 3 highest points reached in each year from 1905 to 1990. You will see that by the late 1970s the 3 actual highest peaks are consistently achieved each year. It seems the sacrifices of earliest climbers paid off.
+
+```{r}
+
+# Look only at successful trips where target height is known.
+
+dt_exp_success <- dt_exp[outcome == "Success"]
+dt_exp_success <- dt_exp_success[!is.na(height_metres)]
+
+# Get the 3 biggest heights per year.
+
+dt_exp_success_top3 <- dt_exp_success[ year < 1991 , .(
+                    top1 = max(height_metres) , 
+                    top2 = ifelse(is.na(sort(unique(height_metres),TRUE)[2]),
+                           max(height_metres), sort(unique(height_metres),TRUE)[2]),
+                    top3 = ifelse(is.na(sort(unique(height_metres),TRUE)[3]),
+                           max(height_metres), sort(unique(height_metres),TRUE)[3])), 
+                by = year ][order(year)]
+
+# Change table to long format so you can use year for animation.
+
+dt_exp_success_top3_long <- gather(dt_exp_success_top3 , "rank" , "height" , 2:4)
+ 
+p <- ggplot( data = dt_exp_success_top3_long , aes(  rank , height )  ) +
+  geom_bar( stat = "identity" ) + 
+  transition_states(year) +
+  labs(
+    title = paste0("Heighest 3 Peaks reach in Year: " , "{closest_state}")) +
+  coord_cartesian(ylim = c(5500 , 9000)) +
+  xlab("") +
+  ylab("Peak Height") +
+  theme_Himalaya()  
+
+# Add additional time to animation.
+
+animate(p, nframes = 500, fps=21)
+```
+
+## Summary
+
+In conclusion, expeditions tend to reach their goals more often the ..
+
+* more crew members they have, including hired staff.
+* better they choose guidance for example from trekking agencies.
+
+Climbers also seem to face less danger if they ..
+
+* aim for lower heights.
+* avoid the monsoon season.
+* rely on the lessons of previous expeditions.
